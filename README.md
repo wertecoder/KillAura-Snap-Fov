@@ -1,2 +1,4 @@
 # KillAura-Snap-Fov
-Kill Aura Snap module or grim fov 
+Kill Aura Snap fov module or grim
+It's my DLC for minecraft BrinzaClient 
+
