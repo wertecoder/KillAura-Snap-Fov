@@ -1,1 +1,1376 @@
-soon...
+package minecraft.game.operation.combat;
+
+import com.google.common.eventbus.Subscribe;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Random;
+
+import com.mojang.blaze3d.platform.GlStateManager;
+import minecraft.game.display.clickgui.DropDown;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.entity.player.ClientPlayerEntity;
+import net.minecraft.client.entity.player.RemoteClientPlayerEntity;
+import net.minecraft.client.gui.screen.ChatScreen;
+import net.minecraft.client.gui.screen.IngameMenuScreen;
+import net.minecraft.client.renderer.ActiveRenderInfo;
+import net.minecraft.client.renderer.BufferBuilder;
+import net.minecraft.client.renderer.Tessellator;
+import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.item.ArmorStandEntity;
+import net.minecraft.entity.merchant.villager.VillagerEntity;
+import net.minecraft.entity.merchant.villager.WanderingTraderEntity;
+import net.minecraft.entity.monster.MonsterEntity;
+import net.minecraft.entity.monster.SilverfishEntity;
+import net.minecraft.entity.monster.SlimeEntity;
+import net.minecraft.entity.passive.*;
+import net.minecraft.entity.passive.fish.CodEntity;
+import net.minecraft.entity.passive.fish.PufferfishEntity;
+import net.minecraft.entity.passive.fish.SalmonEntity;
+import net.minecraft.entity.passive.fish.TropicalFishEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.inventory.container.ClickType;
+import net.minecraft.item.UseAction;
+import net.minecraft.network.play.client.CEntityActionPacket;
+import net.minecraft.network.play.client.CHeldItemChangePacket;
+import net.minecraft.util.Hand;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.vector.Vector2f;
+import net.minecraft.util.math.vector.Vector3d;
+import minecraft.game.advantage.figures.MathUtility;
+import minecraft.game.advantage.figures.SensUtility;
+import minecraft.game.advantage.figures.TimerUtility;
+import minecraft.game.advantage.luvvy.*;
+
+import minecraft.game.advantage.make.color.ColorUtility;
+import minecraft.game.advantage.make.engine2d.RenderUtility;
+import minecraft.game.operation.wamost.api.Category;
+import minecraft.game.operation.wamost.api.Module;
+import minecraft.game.operation.wamost.api.Defuse;
+import minecraft.game.operation.wamost.massa.elements.CheckBoxSetting;
+import minecraft.game.operation.wamost.massa.elements.ModeListSetting;
+import minecraft.game.operation.wamost.massa.elements.ModeSetting;
+import minecraft.game.operation.wamost.massa.elements.SliderSetting;
+import minecraft.game.transactions.EventInput;
+import minecraft.game.transactions.EventMotion;
+import minecraft.game.transactions.EventRender2D;
+import minecraft.game.transactions.EventUpdate;
+import minecraft.system.AG;
+import minecraft.system.managers.friend.FriendManager;
+import org.lwjgl.opengl.GL11;
+
+import static net.minecraft.util.math.MathHelper.clamp;
+
+@Defuse(name="Attack Аura",description = "Автоматические удары по сущности", brand = Category.Combat)
+public class DDATTACK
+        extends Module {
+    public final ModeSetting type = new ModeSetting(
+            "Режим",
+            "Snap",
+                "Snap",
+            "ReallyWorld",
+            "HVH",
+            "Matrix/Vulcan",
+            "Intave/Grim",
+            "SpookyTime",
+            "FakeTime",
+            "FunTime",
+            "FunTimeFov",
+            "Custom rotate"
+    );
+
+    public CheckBoxSetting circle123 = new CheckBoxSetting("Рисовать круг?", true)
+            .visibleIf(() -> this.type.is("FunTimeFov"));
+
+    final SliderSetting miny = new SliderSetting("Плавность Y", 6.0f, 1.0f, 130, 1f)
+            .visibleIf(() -> this.type.is("Custom rotate"));
+
+    final SliderSetting minxz = new SliderSetting("Плавность XZ", 6.0f, 1.0f, 180, 1f)
+            .visibleIf(() -> this.type.is("Custom rotate"));
+
+    final SliderSetting posY = new SliderSetting("Позиция по Y", 1f, -1f, 1f, 0.01f)
+            .visibleIf(() -> this.type.is("Custom rotate") && !this.rejim.is("Снапы"));
+
+    final ModeSetting rejim = new ModeSetting("Режим ротации", "Снапы", "Снапы", "Пакетная")
+            .visibleIf(() -> this.type.is("Custom rotate"));
+    final ModeSetting resetSpeed = new ModeSetting("Возвращать", "Плавно", "Плавно", "Резко", "Никак")
+            .visibleIf(() -> this.type.is("Custom rotate") && this.rejim.is("Снапы"));
+    final SliderSetting resetSmooth = new SliderSetting("Плавность", 0.295F, 0.01F, 0.853f, 0.01F)
+            .visibleIf(() -> this.type.is("Custom rotate") && this.rejim.is("Снапы") && this.resetSpeed.is("Плавно"));
+    final ModeSetting speedpizda = new ModeSetting("Что делать после удара", "Отводить", "Отводить", "Ничего")
+            .visibleIf(() -> this.type.is("Custom rotate") && this.rejim.is("Пакетная"));
+
+    // Элитра
+    public CheckBoxSetting elytratarget = new CheckBoxSetting("ElytraTarget", true);
+    final SliderSetting elytraRange = new SliderSetting("Дистанция элитры", 6.0f, 0.0f, 128.0f, 1f)
+            .visibleIf(() -> this.elytratarget.getValue());
+    final SliderSetting elytraperegon = new SliderSetting("Значение перелёта", 5.0f, 1f, 7.0f, 0.5f)
+            .visibleIf(() -> this.elytratarget.getValue() && this.moreOptions.is("Перегонять противника").getValue());
+
+    // Ротация и прицеливание
+    public CheckBoxSetting pitchmode = new CheckBoxSetting("Изменять pitch", true);
+    final SliderSetting pitch = new SliderSetting("Макс. наклон головы", 90.0f, 0.0f, 90, 1f)
+            .visibleIf(() -> this.pitchmode.getValue());
+
+    final ModeSetting aiming = new ModeSetting("Место наводки", "На голову", "На голову", "На шею", "На грудь", "На торс", "На ноги")
+            .visibleIf(() -> (Boolean) this.options.is("Выбор наводки").getValue());
+
+    final SliderSetting preRange = new SliderSetting("Дистанция наводки", 0.3f, 0.0f, 16.0f, 0.5f)
+            .visibleIf(() -> !this.type.is("Snap") && !this.type.is("FunTimeFov") && !this.type.is("MoonTime snap/MoonAC") && !this.type.is("FunTime snap/Smooth snap"));
+
+    // Диапазоны и частота ударов
+    final SliderSetting attackRange = new SliderSetting("Дистанция атаки", 3.0f, 2.5f, 6.0f, 0.1f);
+    final SliderSetting tick = new SliderSetting("Тики удара", 2.0f, 1.0f, 10.0f, 1.0f)
+            .visibleIf(() -> this.type.is("Snap"));
+
+
+    final SliderSetting minCPS = new SliderSetting("Минимум. CPS", 7.0f, 1.0f, 10.0f, 1.0f)
+            .visibleIf(() -> !this.clickType.is("1.9"));
+
+    final SliderSetting maxCPS = new SliderSetting("Максимум. CPS", 10.0f, 1.0f, 20.0f, 1.0f)
+            .visibleIf(() -> !this.clickType.is("1.9"));
+
+    final ModeSetting clickType = new ModeSetting("Режим пвп", "1.9", "1.8", "1.9");
+
+    // Криты
+    final ModeSetting critType = new ModeSetting("Режим критов", "None", "None", "Matrix", "NCP", "NCP+", "ReallyWorld")
+            .visibleIf(() -> (Boolean) this.options.is("Режимы критов").getValue());
+    public CheckBoxSetting smartCrits = new CheckBoxSetting("Умные криты", false)
+            .visibleIf(() -> (Boolean) this.options.is("Только криты").getValue());
+
+    // Цели
+    final ModeListSetting targetValues = new ModeListSetting("Таргеты",
+            new CheckBoxSetting("Игроки", true),
+            new CheckBoxSetting("Голые", true),
+            new CheckBoxSetting("Мобы", false),
+            new CheckBoxSetting("Животные", false),
+            new CheckBoxSetting("Друзья", false),
+            new CheckBoxSetting("Голые невидимки", true),
+            new CheckBoxSetting("Невидимки", true)
+    );
+
+    final ModeListSetting consider = new ModeListSetting("Учитывать",
+            new CheckBoxSetting("Хп", true),
+            new CheckBoxSetting("Броню", true),
+            new CheckBoxSetting("Дистанцию", true),
+            new CheckBoxSetting("Баффы", true)
+    ).visibleIf(() -> (Boolean) this.options.is("Сортировать целей").getValue());
+
+    // Дополнительные опции
+    final ModeListSetting options = new ModeListSetting("Опции",
+            new CheckBoxSetting("Выбор наводки", true),
+            new CheckBoxSetting("Только криты", true),
+            new CheckBoxSetting("Сортировать целей", true),
+            new CheckBoxSetting("Режимы критов", false),
+            new CheckBoxSetting("Ломать щит", true),
+            new CheckBoxSetting("Отжимать щит", false),
+            new CheckBoxSetting("Синхронизировать TPS", false),
+            new CheckBoxSetting("Фокусировать одну цель", true),
+            new CheckBoxSetting("Коррекция движения", true),
+            new CheckBoxSetting("Оптимальная дистанция", false),
+            new CheckBoxSetting("Резольвер", true)
+    );
+
+    final ModeListSetting moreOptions = new ModeListSetting("Дополнительное",
+            new CheckBoxSetting("Проверка луча", true),
+            new CheckBoxSetting("Перегонять противника", true),
+            new CheckBoxSetting("Бить через стены", true),
+            new CheckBoxSetting("Не бить если кушаешь", false),
+            new CheckBoxSetting("Не бить если в гуи", false)
+    );
+
+    final ModeSetting correctionType = new ModeSetting("Режим коррекции движения", "Свободный", "Свободный", "Удерживание")
+            .visibleIf(() -> (Boolean) this.options.is("Коррекция движения").getValue());
+    private final TimerUtility timerUtility = new TimerUtility();
+    public static Vector2f rotateVector = new Vector2f(0, 0);
+    public Vector2f visualRotateVector = new Vector2f(0, 0);
+    private LivingEntity targetValue;
+    private Entity selected;
+    int ticks = 0;// Время последнего удара
+
+    boolean isRotated = false;
+    boolean isAttacking = false;
+    boolean crystalAuraRule = true;
+    boolean elytraTargetValueRule;
+    float lastYaw;
+    float lastPitch;
+    boolean isReversing = false;
+    private float rotationSpeed;
+    private float rotationAngle;
+    public LivingEntity target;
+    final DDPOTION autoPotion;
+    double moreAttackDistanceOnElytra = 0.0;
+
+    float aimDistance() {
+        return !this.type.is("Snap") && !this.type.is("FunTimeFov") && !this.type.is("MoonTime snap/MoonAC") ? ((Float) this.preRange.getValue()).floatValue() : 0.0f;
+    }
+
+    float maxRange() {
+        if (this.elytratarget.getValue()) {
+            return this.attackDistance() + (DDATTACK.mc.player.isElytraFlying() ? ((Float) this.elytraRange.getValue()).floatValue() : 0.0f) + this.aimDistance();
+        } else if (!this.elytratarget.getValue()) {
+            return this.attackDistance() + this.aimDistance();
+        }
+        return 0;
+    }
+
+    public DDATTACK(DDPOTION autoPotion) {
+        this.autoPotion = autoPotion;
+// Логическая группировка
+        this.addSettings(
+
+                // Общие настройки
+                this.type,
+                this.circle123,
+                this.minxz,
+                this.miny,
+                this.posY,
+                this.rejim,
+
+                // Настройки после удара
+                this.speedpizda,
+                this.correctionType, // Выбор коррекции движения
+                this.resetSpeed,
+                this.resetSmooth,
+                // Элитра
+                this.elytratarget,
+                this.elytraRange,
+                this.elytraperegon,
+
+                // Ротация и прицеливание
+                this.pitchmode,
+                this.pitch,
+                this.aiming,
+                this.preRange,
+                this.attackRange,
+                this.clickType,
+
+                // Диапазоны и расстояния
+
+                // Частота ударов
+                this.tick,
+                this.minCPS,
+                this.maxCPS,
+
+                // Криты
+                this.critType,        // Режимы критов
+                this.smartCrits,      // Умные криты
+
+                // Цели
+                this.targetValues,    // Настройки таргетов
+                this.consider,        // Сортировка целей (ХП, броня и т.д.)
+
+                // Дополнительные опции
+                this.options,         // Различные опции
+                this.moreOptions      // Прочие настройки
+        );
+    }
+
+    @Subscribe
+    public void onInput(EventInput eventInput) {
+        if (((Boolean)this.options.is("Коррекция движения").getValue()).booleanValue() && this.correctionType.is("Свободный") && this.crystalAuraRule) {
+            MoveUtility.fixMovement(eventInput, this.rotateVector.x);
+        }
+    }
+    @Subscribe
+    public void onRender(EventRender2D r) {
+        int centerX = Minecraft.getInstance().getMainWindow().getScaledWidth() / 2;
+        int centerY = Minecraft.getInstance().getMainWindow().getScaledHeight() / 2;
+
+        boolean isThirdPerson = Minecraft.getInstance().gameSettings.thirdPersonView > 0;
+        if (this.type.is("FunTimeFov")) {
+            if (this.circle123.getValue()) {
+                RenderUtility.drawCircleWithFill(centerX, centerY, 360, 0, 145, 0.01f, false, -1);
+            }
+        }
+    }
+
+
+
+
+
+    @Subscribe
+    public void onUpdate(EventUpdate e) {
+        if (!this.crystalAuraRule) {
+            return;
+        }
+
+        if (((Boolean)this.options.is("Фокусировать одну цель").getValue()).booleanValue() &&
+                (this.targetValue == null || !this.isValid(this.targetValue)) ||
+                !((Boolean)this.options.is("Фокусировать одну цель").getValue()).booleanValue()) {
+            this.updateTargetValue();
+        }
+        if (((Boolean)this.options.is("Резольвер").getValue()).booleanValue()) {
+            this.resolvePlayers();
+            this.releaseResolver();
+        }
+
+        if (!(this.targetValue == null || this.autoPotion.isEnabled() && this.autoPotion.isActive())) {
+            this.isRotated = false;
+            this.updateRotation();
+
+            if (this.shouldPlayerFalling() && this.timerUtility.hasTimeElapsed()) {
+                if (this.type.is("FunTimeFov")) {
+                    this.ticks = 1;
+                }
+                else if (this.type.is("Snap")){
+                    this.ticks = ((Float)this.tick.getValue()).intValue();
+                }
+                else if (this.type.is("FunTime")){
+                    this.ticks = 2;
+                }
+                else if (this.type.is("Custom rotate") || this.rejim.is("Снапы")){
+                    this.ticks = ((Float)this.tick.getValue()).intValue();
+                }
+                else if (this.type.is("MoonTime snap/MoonAC")){
+                    this.ticks = 1;
+                }
+                this.forceAttack();
+            }
+
+            if (this.type.is("Snap")) {
+                if (ticks > 0 || mc.player.isElytraFlying()) {
+                    setRotate();
+                    ticks--;
+                    --this.ticks;
+                } else {
+                    this.reset();
+                }
+            }
+
+            // Обработка режима "FunTimeFov"
+            else if (this.type.is("FunTimeFov")) {
+                if (ticks > 0 && LookTarget(getTarget(), mc.player.isElytraFlying())) {
+                    this.setRotate();
+                    --this.ticks;
+                } else {
+                    this.reset();
+                }
+            }
+            else if (this.type.is("FunTime")) {
+                if (ticks > 0 || mc.player.isElytraFlying()) {
+                    this.setRotate();
+                    --this.ticks;
+                } else {
+                    // Плавное возвращение к состоянию сброса
+                    this.smoothReset();
+                }
+            }
+            else if (this.type.is("FunTime snap/Smooth snap")) {
+                if (ticks > 0 || mc.player.isElytraFlying()) {
+                    this.setRotate();
+                    --this.ticks;
+                } else {
+                    this.reset();
+                }
+            }
+            else if (this.type.is("Custom rotate") && this.rejim.is("Снапы")) {
+                if (ticks > 0 || mc.player.isElytraFlying()) {
+                    this.setRotate();
+                    --this.ticks;
+                } else {
+                    if (this.resetSpeed.is("Плавно")) {
+                        this.smoothReset();
+                    }
+                    if (this.resetSpeed.is("Резко")) {
+                        this.reset();
+                    }
+                    if (this.resetSpeed.is("Никак")) {
+                    }
+                }
+            }
+            else if (this.type.is("MoonTime snap/MoonAC")) {
+                if (ticks > 0 || mc.player.isElytraFlying()) {
+                    this.setRotate();
+                    --this.ticks;
+                } else {
+                    this.reset();
+                }
+            }
+
+            else if (!this.isRotated) {
+                this.setRotate();
+            }
+        } else {
+            this.timerUtility.setLastMS(0L);
+            this.reset();
+        }
+
+        if (this.targetValue != null && this.isRotated &&
+                !DDATTACK.mc.player.isElytraFlying() &&
+                DDATTACK.mc.player.getDistanceEyePos(this.targetValue) <= (double)this.attackDistance()) {
+            this.critHelper();
+        }
+    }
+
+
+    @Subscribe
+    private void onWalking(EventMotion e) {
+        if (this.targetValue == null || this.autoPotion.isEnabled() && this.autoPotion.isActive() || !this.crystalAuraRule) {
+            return;
+        }
+        e.setYaw(this.rotateVector.x);
+        e.setPitch(this.rotateVector.y);
+        float yaw = this.rotateVector.x;
+        float pitch = this.rotateVector.y;
+        if (this.type.is("Custom rotate")) {
+            DDATTACK.mc.player.rotationYawHead = yaw;
+            DDATTACK.mc.player.renderYawOffset = PlayerUtility.calculateCorrectYawOffset(yaw);
+            DDATTACK.mc.player.rotationPitchHead = pitch;
+        }
+        else {
+            DDATTACK.mc.player.rotationYawHead = yaw;
+            DDATTACK.mc.player.renderYawOffset = PlayerUtility.calculateCorrectYawOffset(yaw);
+            DDATTACK.mc.player.prePitch = pitch;
+        }
+    }
+
+    public void setRotate() {
+        this.elytraTargetValueRule = DDATTACK.mc.player.isElytraFlying() && this.targetValue.isElytraFlying();
+        if (this.type.is("Snap")) {
+            this.updateRotation(2.14748365E9f, 2.14748365E9f);
+        } else if (this.type.is("FunTimeFov")) {
+            this.updateRotation(155, 155);
+        } else if (this.type.is("FunTime snap/Smooth snap")) {
+            this.updateRotation(2.59993234F, 2.59993234f);
+        } else if (this.type.is("MoonTime snap/MoonAC")) {
+            this.updateRotation(2.59684672F, 2.59684672F);
+        } else {
+            this.updateRotation(9999.0f, 9999.0f);
+        }
+    }
+
+
+
+    private boolean LookTarget(LivingEntity target, boolean elytraFlying) {
+        Vector3d playerDirection = mc.player.getLook(0.0F);
+        Vector3d targetDirection = target.getPositionVec().subtract(mc.player.getEyePosition(1.0F)).normalize();
+        double angle = Math.toDegrees(Math.acos(playerDirection.dotProduct(targetDirection)));
+        return angle <= 43;
+    }
+
+    public float attackDistance() {
+        if (((Boolean)this.options.is("Оптимальная дистанция").getValue()).booleanValue()) {
+            if (!DDATTACK.mc.player.isSwimming()) {
+                return (float)(3.6 + this.moreAttackDistanceOnElytra);
+            }
+            return (float)(3.0 + this.moreAttackDistanceOnElytra);
+        }
+        if (AG.getInst().getModuleManager().getDDFRCM().isEnabled()) {
+        }
+        return (float)((double)((Float)this.attackRange.getValue()).floatValue() + this.moreAttackDistanceOnElytra);
+    }
+
+    public void resolvePlayers() {
+        for (PlayerEntity playerEntity : DDATTACK.mc.world.getPlayers()) {
+            if (!(playerEntity instanceof RemoteClientPlayerEntity)) continue;
+            ((RemoteClientPlayerEntity)playerEntity).resolve();
+        }
+    }
+
+    public void releaseResolver() {
+        for (PlayerEntity playerEntity : DDATTACK.mc.world.getPlayers()) {
+            if (!(playerEntity instanceof RemoteClientPlayerEntity)) continue;
+            ((RemoteClientPlayerEntity)playerEntity).releaseResolver();
+        }
+    }
+    private void updateTargetValue() {
+        ArrayList<LivingEntity> targetValues = new ArrayList<LivingEntity>();
+        for (Entity entity2 : DDATTACK.mc.world.getAllEntities()) {
+            LivingEntity living;
+            if (!(entity2 instanceof LivingEntity) || !this.isValid(living = (LivingEntity)entity2)) continue;
+            targetValues.add(living);
+        }
+        if (targetValues.isEmpty()) {
+            this.targetValue = null;
+            return;
+        }
+        if (targetValues.size() == 1) {
+            this.targetValue = (LivingEntity)targetValues.get(0);
+            return;
+        }
+        targetValues.sort(Comparator.comparingDouble(entity -> MathUtility.entity(entity, (Boolean)this.consider.is("Хп").getValue(), (Boolean)this.consider.is("Броню").getValue(), (Boolean)this.consider.is("Дистанцию").getValue(), this.maxRange(), (Boolean)this.consider.is("Баффы").getValue())));
+        this.targetValue = (LivingEntity)targetValues.get(0);
+    }
+    // Метод для рендера черного квадрата
+    private void renderBlackSquare(Vector3d position) {
+        double size = 1; // Размер квадрата (например, 0.5x0.5 блоков)
+        double x = position.x - size / 2; // Центральная позиция по X
+        double y = position.y;           // Центральная позиция по Y
+        double z = position.z - size / 2; // Центральная позиция по Z
+
+        // Отрисовка квадрата (пример через Tessellator)
+        Tessellator tessellator = Tessellator.getInstance();
+        BufferBuilder buffer = tessellator.getBuffer();
+        GlStateManager.pushMatrix();
+        GlStateManager.disableTexture();
+        GlStateManager.color4f(0.0f, 0.0f, 0.0f, 1.0f); // Устанавливаем цвет (черный)
+
+        buffer.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION);
+        buffer.pos(x, y, z).endVertex();
+        buffer.pos(x + size, y, z).endVertex();
+        buffer.pos(x + size, y, z + size).endVertex();
+        buffer.pos(x, y, z + size).endVertex();
+        tessellator.draw();
+
+        GlStateManager.enableTexture();
+        GlStateManager.popMatrix();
+    }
+
+    private void updateRotation(float rotationYawSpeed, float rotationPitchSpeed) {
+        float f;
+        float scaleFactor = 1.5f;
+
+        if (this.elytraTargetValueRule) {
+            if (!this.moreOptions.is("Перегонять противника").getValue()) {
+                this.elytraperegon.setValue(0.0F);
+            } else {
+                    this.elytraperegon.getValue();
+            }
+
+            // Рассчитываем направление и смещение
+            Vector3d forward = this.targetValue.getForward().normalize();
+            Vector3d forwardOffset = forward.scale(this.elytraperegon.getValue());
+            Vector3d newTargetPosition = this.targetValue.getPositionVec()
+                    .add(forwardOffset)
+                    .add(0.0, clamp(this.targetValue.getPosY() - (double) this.targetValue.getHeight(), 0.0, (double) (this.targetValue.getHeight() / 2.0f)), 0.0);
+
+            Vector3d vec = newTargetPosition
+                    .subtract(DDATTACK.mc.player.getEyePosition(1.0f));
+
+            float yawToTargetValue = (float) MathHelper.wrapDegrees(Math.toDegrees(Math.atan2(vec.z, vec.x)) - 90.0);
+
+            // Инициализация переменной aimingValue
+            float aimingValue = 0;
+            if (this.aiming.is("На шею")) {
+                aimingValue = -0.39f;
+            } else if (this.aiming.is("На грудь")) {
+                aimingValue = -0.2f;
+            } else if (this.aiming.is("На ноги")) {
+                aimingValue = 0.28f;
+            } else if (this.aiming.is("На торс")) {
+                aimingValue = 0.28f;
+            } else if (this.aiming.is("На голову")) {
+                aimingValue = -0.74f;
+            }
+            float pitchToTargetValue = (float)(-Math.toDegrees(Math.atan2(vec.y +- aimingValue, Math.hypot(vec.x, vec.z))));
+            float pitchToTargetValueNEW = (float)(-Math.toDegrees(Math.atan2(vec.y +- aimingValue, Math.hypot(vec.x, vec.z))));
+            float yawDelta = MathHelper.wrapDegrees(yawToTargetValue - this.rotateVector.x);
+            float pitchDelta = MathHelper.wrapDegrees(pitchToTargetValue - this.rotateVector.y);
+            float pitchDeltaNEW = MathHelper.wrapDegrees(pitchToTargetValueNEW - this.rotateVector.y);
+            float randomyaw = MathUtility.random(0.3F, 2.5f);
+            int roundedYaw = (int)yawDelta;
+            switch ((String)this.type.getValue()) {
+                case "ReallyWorld": {
+                    long currentTime = System.currentTimeMillis();
+                    long lastYawUpdateTime = 0;
+                    final long YAW_UPDATE_INTERVAL = 555;
+                    if (currentTime - lastYawUpdateTime >= YAW_UPDATE_INTERVAL) {
+                        float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), 55);
+                        float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                        float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                        lastYawUpdateTime = currentTime;
+                        gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                        this.rotateVector = new Vector2f(gcd, this.rotateVector.y);
+                        this.lastYaw = yaw33;
+                    }
+                    float pitch = Math.max(Math.abs(pitchDeltaNEW), randomyaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDeltaNEW > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(this.rotateVector.x, pitch);
+                    this.lastPitch = pitch;
+
+                    break;
+                }
+                case "FakeTime": {
+                    float[] possibleValues = {25, 25, 45, 115, 75, 25, 45, 25, 45, 95, 25, 65};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), 5), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), -6), 5);
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float targetYaw = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float time = System.currentTimeMillis();
+                    float pidor = 0;
+
+                    float distanceToTarget = Float.MAX_VALUE;
+
+                    if (this.target != null && mc.player != null) {
+                        distanceToTarget = this.target.getDistance(mc.player);
+                    }
+
+                    if (distanceToTarget <= 1.0f) {
+                        pidor = 1;
+                    } else {
+                        pidor = 90;
+                    }
+
+                    float targetPitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -70, pidor);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), 2, 2);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+
+                    long currentTime = System.currentTimeMillis();
+                    if (currentTime >= 1000) {
+                        float yawDifference = targetYaw - this.rotateVector.x;
+                        float interpolatedYaw;
+
+                        float transitionFactor = 0.01f;
+                        if (yawDifference > 0) {
+                            interpolatedYaw = this.rotateVector.x + (yawDifference * (1 - transitionFactor)) + (7 * transitionFactor);
+                        } else {
+                            interpolatedYaw = this.rotateVector.x + (yawDifference * (1 - transitionFactor)) - (7 * transitionFactor);
+                        }
+
+                        float interpolatedPitch = this.rotateVector.y + (targetPitch - this.rotateVector.y + 0.7f);
+
+                        if (Math.abs(this.rotateVector.x - targetYaw) < 1) {
+                            targetYaw = this.lastYaw;
+                        }
+
+                        this.rotateVector = new Vector2f(interpolatedYaw, interpolatedPitch);
+                        this.lastYaw = targetYaw;
+                        this.lastPitch = pitch;
+                    }
+                    break;
+                }
+
+
+
+                case "SpookyTime": {
+                    float[] possibleValues = {35, 45, 55, 25, 25, 25, 25, 35, 35};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float targetYaw = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float targetPitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -15, 89);
+
+
+
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), 15, 15);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+
+                    float interpolatedYaw = this.rotateVector.x + (targetYaw - this.rotateVector.x);
+                    float interpolatedPitch = this.rotateVector.y + (targetPitch - this.rotateVector.y);
+
+                    if (Math.abs(this.rotateVector.x - targetYaw) < 1) {
+                        targetYaw = this.lastYaw;
+                    }
+
+                    this.rotateVector = new Vector2f(interpolatedYaw, interpolatedPitch);
+                    this.lastYaw = targetYaw;
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+
+                case "FunTime": {
+                    long currentTime = System.currentTimeMillis();
+                    long lastYawUpdateTime = 0;
+                    final long YAW_UPDATE_INTERVAL = 555;
+                    if (currentTime - lastYawUpdateTime >= YAW_UPDATE_INTERVAL) {
+                        float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), 55 );
+                        float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                        float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                        lastYawUpdateTime = currentTime;
+                        gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                        this.rotateVector = new Vector2f(gcd, this.rotateVector.y);
+                        this.lastYaw = yaw33;
+                    }
+                    float pitch = Math.max(Math.abs(pitchDeltaNEW), randomyaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(this.rotateVector.x, pitch);
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+
+                case "Custom rotate": {
+
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), this.minxz.getValue());
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), this.miny.getValue());
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    if (this.speedpizda.is("Отводить") && !this.rejim.is("Снапы")) {
+                        if (mc.player.fallDistance > 0.05) {
+                            float[] possibleValues1 = {-45, -35, -30, -25, -15, 0, 15, 25f, 30, 35, 45};
+                            int index = (int) ((System.currentTimeMillis() / 100) % possibleValues1.length);
+                            gcd = this.rotateVector.x + possibleValues1[index];
+                        }
+                    }
+
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+                case "Intave/Grim": {
+                    float[] possibleValues = {25f, 30f, 35f, 40f, 45, 50, 55};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+                case "HVH": {
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), rotationYawSpeed);
+                    float pitch = Math.max(Math.abs(pitchDelta), randomyaw);
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+                case "Snap": {
+                    float yaw = this.rotateVector.x + (float) roundedYaw;
+                    float pitch = clamp(this.rotateVector.y + pitchDelta, -90.0f, 89);
+                    float gcd = SensUtility.getGCDValue();
+                    yaw -= (yaw - this.rotateVector.x) % gcd;
+                    pitch -= (pitch - this.rotateVector.y) % gcd;
+                    this.rotateVector = new Vector2f(yaw, pitch);
+                    break;
+                }
+                case "FunTimeFov": {
+                    float yaw = this.rotateVector.x + (float) roundedYaw;
+                    float pitch = this.rotateVector.y;
+                    float gcd = SensUtility.getGCDValue();
+                    yaw -= (yaw - this.rotateVector.x) % gcd;
+                    pitch -= (pitch - this.rotateVector.y) % gcd;
+                    this.rotateVector = new Vector2f(yaw, pitch);
+                    break;
+                }
+                case "Matrix/Vulcan": {
+                    float[] possibleValues = {35};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), 45);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), 0);
+                    if (timerUtility.isReached(-150)) {
+                        pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    }
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+                case "HolyWorld/Grim": {
+                    float yawDelta12 = MathHelper.wrapDegrees(yawToTargetValue - this.rotateVector.x);
+                    float pitchDelta12 = MathHelper.wrapDegrees(pitchToTargetValue - this.rotateVector.y);
+                    float clampedYaw = Math.min(Math.max(Math.abs(yawDelta12), 1.0E-4f), 44);
+                    float clampedPitch = Math.min(Math.max(Math.abs(pitchDelta12), 1.0E-4f), 5);
+                    float randomYawFactor = (float) (Math.random() * 1.5 - 1.5);
+                    float randomPitchFactor = (float) (Math.random() * 1.5 - 1.0);
+                    float randomThreshold = (float) (Math.random() * 1.5);
+                    float randomAddition = (float) (Math.random() * 2.5 + 1.5);
+                    if (Math.abs(clampedYaw - this.lastYaw) <= randomThreshold) {
+                        clampedYaw = this.lastYaw + randomAddition;
+                    }
+                    float yaw = this.rotateVector.x + (yawDelta12 > 0.0f ? clampedYaw : -(clampedYaw += randomYawFactor));
+                    float pitch = clamp(this.rotateVector.y + (pitchDelta12 > 0.0f ? clampedPitch : -(clampedPitch += randomPitchFactor)), -90.0f, 89);
+                    float gcd = SensUtility.getGCDValue();
+                    yaw -= (yaw - this.rotateVector.x) % gcd;
+                    pitch -= (pitch - this.rotateVector.y) % gcd;
+                    this.rotateVector = new Vector2f(yaw, pitch);
+                    this.lastYaw = clampedYaw;
+                    this.lastPitch = clampedPitch;
+                }
+            }
+        } else {
+
+            Vector3d vec = this.targetValue.getPositionVec().add(0.0, clamp(this.targetValue.getPosY() - (double) this.targetValue.getHeight(), 0.0, (double) (this.targetValue.getHeight() / 2.0f)), 0.0).subtract(DDATTACK.mc.player.getEyePosition(1.0f));
+            float yawToTargetValue = (float) MathHelper.wrapDegrees(Math.toDegrees(Math.atan2(vec.z, vec.x)) - 90.0);
+            float aimingValue = 0; // Инициализация переменной aimingValue
+            if (this.type.is("Custom rotate") && !this.rejim.is("Снапы") && !this.speedpizda.is("Отводить")) {
+                aimingValue = -this.posY.getValue();
+            }
+            else {
+                if (this.aiming.is("На шею")) {
+                    aimingValue = -0.39f;
+                } else if (this.aiming.is("На грудь")) {
+                    aimingValue = -0.2f;
+                } else if (this.aiming.is("На ноги")) {
+                    aimingValue = 0.28f;
+                } else if (this.aiming.is("На торс")) {
+                    aimingValue = 0.28f;
+                } else if (this.aiming.is("На голову")) {
+                    aimingValue = -0.74f;
+                }
+            }
+            float pitchDA = 90; // Инициализация переменной aimingValue
+            if (this.pitchmode.getValue()) {
+                pitchDA = this.pitch.getValue();
+            } else {
+                pitchDA = 90;
+            }
+            float pitchToTargetValue = (float) (-Math.toDegrees(Math.atan2(vec.y + -aimingValue, Math.hypot(vec.x, vec.z))));
+            float pitchToTargetValueNEW = (float) (-Math.toDegrees(Math.atan2(vec.y + -aimingValue, Math.hypot(vec.x, vec.z))));
+            float yawDelta = MathHelper.wrapDegrees(yawToTargetValue - this.rotateVector.x);
+            float pitchDelta = MathHelper.wrapDegrees(pitchToTargetValue - this.rotateVector.y);
+            float pitchDeltaNEW = MathHelper.wrapDegrees(pitchToTargetValueNEW - this.rotateVector.y);
+            float randomyaw = MathUtility.random(0.3F, 2.5f);
+            int roundedYaw = (int) yawDelta;
+            switch ((String) this.type.getValue()) {
+                case "ReallyWorld": {
+                    long currentTime = System.currentTimeMillis();
+                    long lastYawUpdateTime = 0;
+                    final long YAW_UPDATE_INTERVAL = 555;
+                    if (currentTime - lastYawUpdateTime >= YAW_UPDATE_INTERVAL) {
+                        float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), 55);
+                        float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                        float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                        lastYawUpdateTime = currentTime;
+                        gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                        this.rotateVector = new Vector2f(gcd, this.rotateVector.y);
+                        this.lastYaw = yaw33;
+                    }
+                    float pitch = Math.max(Math.abs(pitchDeltaNEW), randomyaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDeltaNEW > 0.0f ? pitch : -pitch), -89.0f, pitchDA);
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(this.rotateVector.x, pitch);
+                    this.lastPitch = pitch;
+
+                    break;
+                }
+                case "FakeTime": {
+                    float[] possibleValues = {25, 25, 45, 115, 75, 25, 45, 25, 45, 95, 25, 65};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), 5), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), -6), 25);
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float targetYaw = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float time = System.currentTimeMillis();
+                    float pidor = 0;
+
+                    float distanceToTarget = Float.MAX_VALUE;
+
+                    if (this.target != null && mc.player != null) {
+                        distanceToTarget = this.target.getDistance(mc.player);
+                    }
+
+                    if (distanceToTarget <= 1.0f) {
+                        pidor = 1;
+                    } else {
+                        pidor = 90;
+                    }
+
+                    float targetPitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -70, pidor);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), 2, 2);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+
+                    long currentTime = System.currentTimeMillis();
+                    if (currentTime >= 1000) {
+                        float yawDifference = targetYaw - this.rotateVector.x;
+                        float interpolatedYaw;
+
+                        float transitionFactor = 0.01f;
+                        if (yawDifference > 0) {
+                            interpolatedYaw = this.rotateVector.x + (yawDifference * (1 - transitionFactor)) + (7 * transitionFactor);
+                        } else {
+                            interpolatedYaw = this.rotateVector.x + (yawDifference * (1 - transitionFactor)) - (7 * transitionFactor);
+                        }
+
+                        float interpolatedPitch = this.rotateVector.y + (targetPitch - this.rotateVector.y + 0.7f);
+
+                        if (Math.abs(this.rotateVector.x - targetYaw) < 1) {
+                            targetYaw = this.lastYaw;
+                        }
+
+                        this.rotateVector = new Vector2f(interpolatedYaw, interpolatedPitch);
+                        this.lastYaw = targetYaw;
+                        this.lastPitch = pitch;
+                    }
+                    break;
+                }
+
+
+
+                case "SpookyTime": {
+                    float[] possibleValues = {35, 45, 55, 25, 25, 25, 25, 35, 35};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float targetYaw = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    float targetPitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -15, pitchDA);
+
+
+
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), 15, 15);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+
+                    float interpolatedYaw = this.rotateVector.x + (targetYaw - this.rotateVector.x);
+                    float interpolatedPitch = this.rotateVector.y + (targetPitch - this.rotateVector.y);
+
+                    if (Math.abs(this.rotateVector.x - targetYaw) < 1) {
+                        targetYaw = this.lastYaw;
+                    }
+
+                    this.rotateVector = new Vector2f(interpolatedYaw, interpolatedPitch);
+                    this.lastYaw = targetYaw;
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+
+                case "FunTime": {
+                    long currentTime = System.currentTimeMillis();
+                    long lastYawUpdateTime = 0;
+                    final long YAW_UPDATE_INTERVAL = 555;
+                    if (currentTime - lastYawUpdateTime >= YAW_UPDATE_INTERVAL) {
+                        float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), 155);
+                        float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                        float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                        lastYawUpdateTime = currentTime;
+                        gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                        this.rotateVector = new Vector2f(gcd, this.rotateVector.y);
+                        this.lastYaw = yaw33;
+                    }
+                    float pitch = Math.max(Math.abs(pitchDeltaNEW), randomyaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, pitchDA);
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(this.rotateVector.x, pitch);
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+
+                case "Custom rotate": {
+
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), this.minxz.getValue());
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), this.miny.getValue());
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    if (this.speedpizda.is("Отводить") && !this.rejim.is("Снапы")) {
+                        if (mc.player.fallDistance > 0.05) {
+                            float[] possibleValues1 = {-45, -35, -30, -25, -15, 0, 15, 25f, 30, 35, 45};
+                            int index = (int) ((System.currentTimeMillis() / 100) % possibleValues1.length);
+                            gcd = this.rotateVector.x + possibleValues1[index];
+                        }
+                    }
+
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, pitchDA);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+                case "Intave/Grim": {
+                    float[] possibleValues = {25f, 30f, 35f, 40f, 45, 50, 55};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, pitchDA);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+                case "HVH": {
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), rotationYawSpeed);
+                    float pitch = Math.max(Math.abs(pitchDelta), randomyaw);
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, pitchDA);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+                case "Snap": {
+                    float yaw = this.rotateVector.x + (float) roundedYaw;
+                    float pitch = clamp(this.rotateVector.y + pitchDelta, -90.0f, pitchDA);
+                    float gcd = SensUtility.getGCDValue();
+                    yaw -= (yaw - this.rotateVector.x) % gcd;
+                    pitch -= (pitch - this.rotateVector.y) % gcd;
+                    this.rotateVector = new Vector2f(yaw, pitch);
+                    break;
+                }
+                case "FunTimeFov": {
+                    float yaw = this.rotateVector.x + (float) roundedYaw;
+                    float pitch = this.rotateVector.y;
+                    float gcd = SensUtility.getGCDValue();
+                    yaw -= (yaw - this.rotateVector.x) % gcd;
+                    pitch -= (pitch - this.rotateVector.y) % gcd;
+                    this.rotateVector = new Vector2f(yaw, pitch);
+                    break;
+                }
+                case "Matrix/Vulcan": {
+                    float[] possibleValues = {35};
+                    float yaw = Math.min(Math.max(Math.abs(yawDelta), randomyaw), 45);
+                    float pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), 0);
+                    if (timerUtility.isReached(-150)) {
+                        pitch = Math.min(Math.max(Math.abs(pitchDelta), randomyaw), possibleValues[(int) MathUtility.random(0, possibleValues.length - 1)]);
+                    }
+
+                    float yaw33 = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -(yaw));
+                    float gcd = this.rotateVector.x + (yawDelta > 0.0f ? yaw : -yaw);
+                    pitch = clamp(this.rotateVector.y + (pitchDelta > 0.0f ? pitch : -pitch), -89.0f, 89);
+                    gcd -= (yaw33 - this.rotateVector.x) % SensUtility.getGCDValue();
+                    pitch -= (pitch - this.rotateVector.y) % SensUtility.getGCDValue();
+                    this.rotateVector = new Vector2f(gcd, pitch);
+                    this.lastYaw = yaw33;
+                    this.lastPitch = pitch;
+                    break;
+                }
+
+                case "HolyWorld/Grim": {
+                    float yawDelta12 = MathHelper.wrapDegrees(yawToTargetValue - this.rotateVector.x);
+                    float pitchDelta12 = MathHelper.wrapDegrees(pitchToTargetValue - this.rotateVector.y);
+                    float clampedYaw = Math.min(Math.max(Math.abs(yawDelta12), 1.0E-4f), 44);
+                    float clampedPitch = Math.min(Math.max(Math.abs(pitchDelta12), 1.0E-4f), 5);
+                    float randomYawFactor = (float) (Math.random() * 1.5 - 1.5);
+                    float randomPitchFactor = (float) (Math.random() * 1.5 - 1.0);
+                    float randomThreshold = (float) (Math.random() * 1.5);
+                    float randomAddition = (float) (Math.random() * 2.5 + 1.5);
+                    if (Math.abs(clampedYaw - this.lastYaw) <= randomThreshold) {
+                        clampedYaw = this.lastYaw + randomAddition;
+                    }
+                    float yaw = this.rotateVector.x + (yawDelta12 > 0.0f ? clampedYaw : -(clampedYaw += randomYawFactor));
+                    float pitch = clamp(this.rotateVector.y + (pitchDelta12 > 0.0f ? clampedPitch : -(clampedPitch += randomPitchFactor)), -90.0f, pitchDA);
+                    float gcd = SensUtility.getGCDValue();
+                    yaw -= (yaw - this.rotateVector.x) % gcd;
+                    pitch -= (pitch - this.rotateVector.y) % gcd;
+                    this.rotateVector = new Vector2f(yaw, pitch);
+                    this.lastYaw = clampedYaw;
+                    this.lastPitch = clampedPitch;
+                }
+            }
+        }
+        if (((Boolean)this.options.is("Коррекция движения").getValue()).booleanValue()) {
+            DDATTACK.mc.player.rotationYawOffset = this.rotateVector.x;
+        }
+    }
+
+    public void updateRotation() {
+        float limitSpeed = 60.0f;
+        float reverseSpeed = 5.0f;
+        if (!this.isReversing) {
+            this.rotationSpeed += reverseSpeed;
+            if (this.rotationSpeed > limitSpeed) {
+                this.rotationSpeed = limitSpeed;
+                this.isReversing = true;
+            }
+        } else {
+            this.rotationSpeed -= reverseSpeed;
+            if (this.rotationSpeed < -limitSpeed) {
+                this.rotationSpeed = -limitSpeed;
+                this.isReversing = false;
+            }
+        }
+        this.rotationAngle += this.rotationSpeed;
+        this.rotationAngle = (this.rotationAngle + 360.0f) % 360.0f;
+    }
+
+    public void critHelper() {
+        switch ((String)this.critType.getValue()) {
+            case "None": {
+                return;
+            }
+            case "Matrix": {
+                if (!(DDATTACK.mc.player.isJumping && DDATTACK.mc.player.motion.getY() < -0.1 && (double)DDATTACK.mc.player.fallDistance > 0.5 && MoveUtility.getMotion() < 0.12)) break;
+                DDATTACK.mc.player.motion.y = -1.0;
+                break;
+            }
+            case "NCP": {
+                if (!DDATTACK.mc.player.isJumping || DDATTACK.mc.player.fallDistance == 0.0f) break;
+                DDATTACK.mc.player.motion.y -= 0.078;
+                break;
+            }
+            case "NCP+": {
+                if ((double)DDATTACK.mc.player.fallDistance > 0.7 && (double)DDATTACK.mc.player.fallDistance < 0.8 && this.targetValue != null) {
+                    DDATTACK.mc.timer.timerSpeed = 2.0f;
+                    break;
+                }
+                DDATTACK.mc.timer.timerSpeed = 1.0f;
+                break;
+            }
+            case "ReallyWorld": {
+                if (!DDATTACK.mc.player.isJumping || !(DDATTACK.mc.player.fallDistance > 0.0f) || !((double)DDATTACK.mc.player.fallDistance <= 1.2) || MoveUtility.moveKeysPressed()) break;
+                DDATTACK.mc.player.jumpTicks = 0;
+                if ((double)DDATTACK.mc.timer.timerSpeed != 1.0) break;
+                DDATTACK.mc.timer.timerSpeed = 1.005f;
+            }
+        }
+    }
+
+    private void forceAttack() {
+        if (!this.isAttacking && !this.canAttack()) {
+            return;
+        }
+        this.isAttacking = true;
+        try {
+            this.preAttack();
+            this.attack();
+            this.postAttack();
+        } finally {
+            this.isAttacking = false;
+        }
+    }
+
+    private boolean canAttack() {
+        this.selected = MouseUtility.getMouseOver(this.targetValue, this.rotateVector.x, this.rotateVector.y, this.attackDistance());
+        if (DDATTACK.mc.player.getDistanceEyePos(this.targetValue) > (double)this.attackDistance()) {
+            return false;
+        }
+        if (((Boolean)this.moreOptions.is("Проверка луча").getValue()).booleanValue() && !this.elytraTargetValueRule && this.selected == null) {
+            return false;
+        }
+        if (!((Boolean)this.moreOptions.is("Бить через стены").getValue()).booleanValue() && !DDATTACK.mc.player.canEntityBeSeen(this.targetValue)) {
+            return false;
+        }
+        if (((Boolean)this.moreOptions.is("Не бить если кушаешь").getValue()).booleanValue() && DDATTACK.mc.player.isHandActive() && DDATTACK.mc.player.getHeldItemOffhand().getUseAction() == UseAction.EAT) {
+            return false;
+        }
+        return (Boolean)this.moreOptions.is("Не бить если в гуи").getValue() == false || DDATTACK.mc.currentScreen == null || DDATTACK.mc.currentScreen instanceof DropDown || DDATTACK.mc.currentScreen instanceof ChatScreen || DDATTACK.mc.currentScreen instanceof IngameMenuScreen;
+    }
+
+    private void preAttack() {
+        if (DDATTACK.mc.player.isBlocking() && ((Boolean)this.options.is("Отжимать щит").getValue()).booleanValue()) {
+            DDATTACK.mc.playerController.onStoppedUsingItem(DDATTACK.mc.player);
+        }
+    }
+
+    private void attack() {
+        int maxCPSValue;
+        int minCPSValue = ((Float)this.minCPS.getValue()).intValue();
+        if (minCPSValue > (maxCPSValue = ((Float)this.maxCPS.getValue()).intValue())) {
+            maxCPSValue = minCPSValue;
+        }
+        int minMS = 1000 / maxCPSValue;
+        int maxMS = 1000 / minCPSValue;
+        Random random = new Random();
+        int randomMS = random.nextInt(maxMS - minMS + 1) + minMS;
+        this.timerUtility.setLastMS(this.clickType.is("1.9") ? 500L : (long)randomMS);
+        DDCRIT.cancelCrit = true;
+        if (AG.getInst().getModuleManager().getDDCRIT().isEnabled() && DDCRIT.canUseDDCRIT()) {
+            AG.getInst().getModuleManager().getDDCRIT().sendCrit();
+        }
+        DDATTACK.mc.playerController.attackEntity(DDATTACK.mc.player, this.targetValue);
+        DDATTACK.mc.player.swingArm(Hand.MAIN_HAND);
+        DDCRIT.cancelCrit = false;
+    }
+
+    private void postAttack() {
+        LivingEntity livingEntity = this.targetValue;
+        if (livingEntity instanceof PlayerEntity) {
+            PlayerEntity player = (PlayerEntity)livingEntity;
+            if (((Boolean)this.options.is("Ломать щит").getValue()).booleanValue()) {
+                this.breakShieldPlayer(player);
+            }
+        }
+    }
+
+    public boolean shouldPlayerFalling() {
+        return AttackUtility.isPlayerFallingP((Boolean)this.options.is("Только криты").getValue() != false && !DDCRIT.canUseDDCRIT(), (Boolean)this.smartCrits.getValue(), (Boolean)this.options.is("Синхронизировать TPS").getValue(), this.clickType.is("1.9"));
+    }
+
+    private boolean isValid(LivingEntity entity) {
+        if (entity instanceof ClientPlayerEntity) {
+            return false;
+        }
+        if (entity.ticksExisted < 3) {
+            return false;
+        }
+        if (DDATTACK.mc.player.getDistanceEyePos(entity) > (double)this.maxRange()) {
+            return false;
+        }
+        if (entity instanceof PlayerEntity) {
+            PlayerEntity p = (PlayerEntity)entity;
+            if (DDBOT.isBot(entity)) {
+                return false;
+            }
+            if (!((Boolean)this.targetValues.is("Друзья").getValue()).booleanValue() && FriendManager.isFriend(p.getName().getString())) {
+                return false;
+            }
+            if (p.getName().getString().equalsIgnoreCase(DDATTACK.mc.player.getName().getString())) {
+                return false;
+            }
+        }
+        if (entity instanceof PlayerEntity && !((Boolean)this.targetValues.is("Игроки").getValue()).booleanValue()) {
+            return false;
+        }
+        if (entity instanceof PlayerEntity && entity.getTotalArmorValue() == 0 && !((Boolean)this.targetValues.is("Голые").getValue()).booleanValue()) {
+            return false;
+        }
+        if (entity instanceof PlayerEntity && entity.isInvisible() && entity.getTotalArmorValue() == 0 && !((Boolean)this.targetValues.is("Голые невидимки").getValue()).booleanValue()) {
+            return false;
+        }
+        if (entity instanceof PlayerEntity && entity.isInvisible() && !((Boolean)this.targetValues.is("Невидимки").getValue()).booleanValue()) {
+            return false;
+        }
+        if (entity instanceof PlayerEntity && ((PlayerEntity)entity).isCreative()) {
+            return false;
+        }
+        if ((entity instanceof MonsterEntity || entity instanceof SlimeEntity || entity instanceof VillagerEntity|| entity instanceof IronGolemEntity|| entity instanceof SquidEntity||  entity instanceof BatEntity || entity instanceof WanderingTraderEntity || entity instanceof SalmonEntity||  entity instanceof DolphinEntity ||  entity instanceof CodEntity ||  entity instanceof TropicalFishEntity || entity instanceof PufferfishEntity|| entity instanceof VillagerEntity|| entity instanceof SilverfishEntity) && !((Boolean)this.targetValues.is("Мобы").getValue()).booleanValue()) {
+            return false;
+        }
+        if (entity instanceof AnimalEntity && !((Boolean)this.targetValues.is("Животные").getValue()).booleanValue()) {
+            return false;
+        }
+        return !entity.isInvulnerable() && entity.isAlive() && !(entity instanceof ArmorStandEntity);
+    }
+
+    private void breakShieldPlayer(PlayerEntity entity) {
+        if (entity.isBlocking()) {
+            int invSlot = InventoryUtility.getInstance().getAxeInInventory(false);
+            int hotBarSlot = InventoryUtility.getInstance().getAxeInInventory(true);
+            if (hotBarSlot == -1 && invSlot != -1) {
+                int bestSlot = InventoryUtility.getInstance().findBestSlotInHotBar();
+                DDATTACK.mc.playerController.windowClick(0, invSlot, 0, ClickType.PICKUP, DDATTACK.mc.player);
+                DDATTACK.mc.playerController.windowClick(0, bestSlot + 36, 0, ClickType.PICKUP, DDATTACK.mc.player);
+                DDATTACK.mc.player.connection.sendPacket(new CHeldItemChangePacket(bestSlot));
+                DDATTACK.mc.playerController.attackEntity(DDATTACK.mc.player, entity);
+                DDATTACK.mc.player.swingArm(Hand.MAIN_HAND);
+                DDATTACK.mc.player.connection.sendPacket(new CHeldItemChangePacket(DDATTACK.mc.player.inventory.currentItem));
+                DDATTACK.mc.playerController.windowClick(0, bestSlot + 36, 0, ClickType.PICKUP, DDATTACK.mc.player);
+                DDATTACK.mc.playerController.windowClick(0, invSlot, 0, ClickType.PICKUP, DDATTACK.mc.player);
+            }
+            if (hotBarSlot != -1) {
+                DDATTACK.mc.player.connection.sendPacket(new CHeldItemChangePacket(hotBarSlot));
+                DDATTACK.mc.playerController.attackEntity(DDATTACK.mc.player, entity);
+                DDATTACK.mc.player.swingArm(Hand.MAIN_HAND);
+                DDATTACK.mc.player.connection.sendPacket(new CHeldItemChangePacket(DDATTACK.mc.player.inventory.currentItem));
+            }
+        }
+    }
+    private void smoothReset() {
+        float targetRotation = mc.player.rotationYaw;
+        float targetPitch = mc.player.rotationPitch;
+
+        float speed = 0.295f; // Скорость инр
+        if (this.resetSpeed.is("Плавно")) {
+            speed = this.resetSmooth.getValue();
+        }
+        if (this.type.is("FunTime")) {
+            speed = 0.295F;
+        }
+
+        this.rotateVector.x = interpolate(this.rotateVector.x, targetRotation, speed);
+        this.rotateVector.y = interpolate(this.rotateVector.y, targetPitch, speed);
+
+        if (Math.abs(this.rotateVector.x - targetRotation) < 0.01F &&
+                Math.abs(this.rotateVector.y - targetPitch) < 0.01F) {
+            this.reset();
+        }
+
+        if (options.is("Коррекция движения").getValue()) {
+            mc.player.rotationYawOffset = rotateVector.x;
+        }
+    }
+
+    private float interpolate(float current, float target, float speed) {
+        return current + (target - current) * speed;
+    }
+    private void reset() {
+        if (options.is("Коррекция движения").getValue() ) {
+            mc.player.rotationYawOffset = Integer.MIN_VALUE;
+        }
+        rotateVector = new Vector2f(mc.player.rotationYaw, mc.player.rotationPitch);
+    }
+
+    //       case "FunTime test/Polar test":
+    //  float pitch = Math.min(Math.max(Math.abs(yawDelta), 1.4F), rotationYawSpeed);
+    //   float gcd = Math.min(Math.max(Math.abs(pitchDelta), 1.2F), rotationPitchSpeed);
+    //float horizontalRandom1 = (float)(Math.random() * (double)6.0F - (double)3.0F);
+    // float verticalRandom1 = (float)(Math.random() * 0.85 - 0.425);
+    //       if (isAttacking && this.selected != this.target) {
+    // gcd = Math.max(Math.abs(pitchDelta), 1.0F);
+    // } else {
+    //    gcd /= 3.0F;
+    //}
+
+    //float interpolatedYaw1 = this.rotateVector.x + (yawDelta > 0.0F ? pitch : -pitch);
+    //float interpolatedPitch1 = MathHelper.clamp(this.rotateVector.y + (pitchDelta > 0.0F ? gcd : -gcd), -89.0F, 89.0F);
+    //float clampedYaw = interpolatedYaw1 + horizontalRandom1;
+    //float clampedPitch = interpolatedPitch1 + verticalRandom1;
+    //float yaw = SensUtility.getGCDValue();
+    //clampedYaw -= (clampedYaw - this.rotateVector.x) % yaw;
+    //clampedPitch -= (clampedPitch - this.rotateVector.y) % yaw;
+    //  this.rotateVector = new Vector2f(clampedYaw, clampedPitch);
+    //    this.lastYaw = pitch;
+    //      this.lastPitch = gcd;
+    //        if ((Boolean)this.options.is("Коррекция движения").getValue()) {
+    //mc.player.rotationYawOffset = clampedYaw;
+    //}
+
+
+    @Override
+    public void onEnable() {
+        super.onEnable();
+        this.reset();
+        this.targetValue = null;
+    }
+
+    @Override
+    public void onDisable() {
+        super.onDisable();
+        this.reset();
+        this.timerUtility.setLastMS(0L);
+        this.targetValue = null;
+        DDATTACK.mc.timer.timerSpeed = 1.0f;
+    }
+
+    public ModeSetting getType() {
+        return this.type;
+    }
+
+    public ModeListSetting getOptions() {
+        return this.options;
+    }
+
+    public ModeListSetting getMoreOptions() {
+        return this.moreOptions;
+    }
+
+    public TimerUtility getTimerUtility() {
+        return this.timerUtility;
+    }
+
+    public LivingEntity getTarget() {
+        return this.targetValue;
+    }
+
+    public void setTarget(LivingEntity targetValue) {
+        this.targetValue = targetValue;
+    }
+}
+
